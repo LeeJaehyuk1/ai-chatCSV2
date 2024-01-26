@@ -1,5 +1,5 @@
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 from langchain.prompts import ChatPromptTemplate
 from langchain.document_loaders import UnstructuredFileLoader
 from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
