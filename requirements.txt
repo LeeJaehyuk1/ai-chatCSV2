@@ -1,4 +1,4 @@
 langchain
 openai
 faiss-cpu
-tiktoken
+tempfile

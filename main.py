@@ -1,141 +1,122 @@
 # from dotenv import load_dotenv
 # load_dotenv()
-from langchain.prompts import ChatPromptTemplate
-from langchain.document_loaders import UnstructuredFileLoader
-from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
-from langchain.storage import LocalFileStore
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores.faiss import FAISS
-from langchain.chat_models import ChatOpenAI
-from langchain.callbacks.base import BaseCallbackHandler
 import streamlit as st
+import pandas as pd
+import json
+import openai
+import os
+import re
+import matplotlib.pyplot as plt
+# from langchain.agents import create_csv_agent
+from langchain_experimental.agents.agent_toolkits import create_csv_agent
+from langchain.chat_models import ChatOpenAI
+from langchain.agents.agent_types import AgentType
+import tempfile
+# from apikey import OPENAI_API_KEY
+# openai.api_key = OPENAI_API_KEY
 
-st.set_page_config(
-    page_title="DocumentGPT",
-    page_icon="📃",
-)
-
-
-class ChatCallbackHandler(BaseCallbackHandler):
-    message = ""
-
-    def on_llm_start(self, *args, **kwargs):
-        self.message_box = st.empty()
-
-    def on_llm_end(self, *args, **kwargs):
-        save_message(self.message, "ai")
-
-    def on_llm_new_token(self, token, *args, **kwargs):
-        self.message += token
-        self.message_box.markdown(self.message)
-
-
-llm = ChatOpenAI(
-    temperature=0.1,
-    streaming=True,
-    callbacks=[
-        ChatCallbackHandler(),
-    ],
-)
-
-
-@st.cache_data(show_spinner="Embedding file...")
-def embed_file(file):
-    file_content = file.read()
-    file_path = f"./.cache/files/{file.name}"
-    with open(file_path, "wb") as f:
-        f.write(file_content)
-    cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
-    splitter = CharacterTextSplitter.from_tiktoken_encoder(
-        separator="\n",
-        chunk_size=600,
-        chunk_overlap=100,
-    )
-    loader = UnstructuredFileLoader(file_path)
-    docs = loader.load_and_split(text_splitter=splitter)
-    embeddings = OpenAIEmbeddings()
-    cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
-    vectorstore = FAISS.from_documents(docs, cached_embeddings)
-    retriever = vectorstore.as_retriever()
-    return retriever
-
-
-def save_message(message, role):
-    st.session_state["messages"].append({"message": message, "role": role})
-
-
-def send_message(message, role, save=True):
-    with st.chat_message(role):
-        st.markdown(message)
-    if save:
-        save_message(message, role)
-
-
-def paint_history():
-    for message in st.session_state["messages"]:
-        send_message(
-            message["message"],
-            message["role"],
-            save=False,
-        )
-
-
-def format_docs(docs):
-    return "\n\n".join(document.page_content for document in docs)
-
-
-prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
-            Answer the question using ONLY the following context. If you don't know the answer just say you don't know. DON'T make anything up.
-            
-            Context: {context}
-            """,
-        ),
-        ("human", "{question}"),
-    ]
-)
-
-
-st.title("DocumentGPT")
-
-st.markdown(
-    """
-Welcome!
-            
-Use this chatbot to ask questions to an AI about your files!
-
-Upload your files on the sidebar.
-"""
-)
-
-with st.sidebar:
-    file = st.file_uploader(
-        "Upload a .txt .pdf or .docx file",
-        type=["pdf", "txt", "docx"],
+def csv_agent_func(file_path, user_message):
+    """Run the CSV agent with the given file path and user message."""
+    agent = create_csv_agent(
+        ChatOpenAI(temperature=0, model="gpt-3.5-turbo"),
+        file_path, 
+        verbose=True,
+        agent_type=AgentType.OPENAI_FUNCTIONS,
     )
 
-if file:
-    retriever = embed_file(file)
-    send_message("I'm ready! Ask away!", "ai", save=False)
-    paint_history()
-    message = st.chat_input("Ask anything about your file...")
-    if message:
-        send_message(message, "human")
-        chain = (
-            {
-                "context": retriever | RunnableLambda(format_docs),
-                "question": RunnablePassthrough(),
+    try:
+        # Properly format the user's input and wrap it with the required "input" key
+        tool_input = {
+            "input": {
+                "name": "python",
+                "arguments": user_message
             }
-            | prompt
-            | llm
-        )
-        with st.chat_message("ai"):
-            chain.invoke(message)
+        }
+        
+        response = agent.run(tool_input)
+        return response
+    except Exception as e:
+        st.write(f"Error: {e}")
+        return None
+    
+
+def display_content_from_json(json_response):
+    """
+    Display content to Streamlit based on the structure of the provided JSON.
+    """
+    
+    # Check if the response has plain text.
+    if "answer" in json_response:
+        
+        st.write(json_response["answer"])
+
+    # Check if the response has a bar chart.
+    if "bar" in json_response:
+        data = json_response["bar"]
+        df = pd.DataFrame(data)
+        df.set_index("columns", inplace=True)
+        st.bar_chart(df)
+
+    # Check if the response has a table.
+    if "table" in json_response:
+        data = json_response["table"]
+        df = pd.DataFrame(data["data"], columns=data["columns"])
+        st.table(df)    
 
 
-else:
-    st.session_state["messages"] = []
+def extract_code_from_response(response):
+    """Extracts Python code from a string response."""
+    # Use a regex pattern to match content between triple backticks
+    code_pattern = r"```python(.*?)```"
+    match = re.search(code_pattern, response, re.DOTALL)
+    
+    if match:
+        # Extract the matched code and strip any leading/trailing whitespaces
+        return match.group(1).strip()
+    return None
+
+
+# def csv_analyzer_app():
+"""Main Streamlit application for CSV analysis."""
+
+st.title('CSV Assistant')
+st.write('Please upload your CSV file and enter your query below:')
+
+uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+
+if uploaded_file is not None:
+    file_details = {"FileName": uploaded_file.name, "FileType": uploaded_file.type, "FileSize": uploaded_file.size}
+    st.write(file_details)
+    
+    # Save the uploaded file to disk
+    # file_path = os.path.join("D:\GPT\tmp", uploaded_file.name)
+    # with open(file_path, "wb") as f:
+    #     f.write(uploaded_file.getbuffer())
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file_path = tmp_file.name    
+    
+    df = pd.read_csv(tmp_file_path, thousands = ',')
+    print(df)
+    st.dataframe(df)
+    
+    user_input = st.text_input("Your query")
+    if st.button('Run'):
+        response = csv_agent_func(tmp_file_path, user_input)
+        
+        # Extracting code from the response
+        code_to_execute = extract_code_from_response(response)
+        
+        if code_to_execute:
+            try:
+                # Making df available for execution in the context
+                exec(code_to_execute, globals(), {"df": df, "plt": plt})
+                fig = plt.gcf()  # Get current figure
+                st.pyplot(fig)  # Display using Streamlit
+            except Exception as e:
+                st.write(f"Error executing code: {e}")
+        else:
+            st.write(response)
+
+st.divider()
